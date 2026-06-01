@@ -1,78 +1,82 @@
 const express = require('express');
 const app = express();
+
+// Parse application/json bodies
 app.use(express.json());
 
-// Mock in-memory state to capture stress issues
+// Mock in-memory state to track performance/concurrency issues
 let activeConnections = 0;
-const DB_SIMULATION_THRESHOLD = 15; // Simulate pool saturation above 15 VU concurrent connections
+const DB_SIMULATION_THRESHOLD = 15; // Saturation gate triggers above 15 VU concurrent connections
 
-// Enhanced Request Logging Middleware for Debugging Test Frameworks
+// Enhanced Request Logging Middleware for Deep Test-Runner Visibility
 app.use((req, res, next) => {
   activeConnections++;
   
-  // Log request arrival for visibility into the test framework's behavior
-  console.log(`[REQUEST] ${new Date().toISOString()} - ${req.method} ${req.url} | Active Conns: ${activeConnections}`);
+  // High-visibility timestamp logging to track precise request arrival profiles
+  console.log(`[REQUEST] ${new Date().toISOString()} - ${req.method} ${req.url} | Active Connections: ${activeConnections}`);
   
   res.on('finish', () => { 
     activeConnections--; 
-    console.log(`[RESPONSE] ${req.method} ${req.url} completed with status ${res.statusCode}`);
+    console.log(`[RESPONSE] ${new Date().toISOString()} - ${req.method} ${req.url} -> Completed with Status ${res.statusCode} | Remaining Conns: ${activeConnections}`);
   });
   next();
 });
 
 /**
- * 1. Authentication & Token Exchange
- * Improvement: Supports multiple known credential patterns and fallback modes to allow 
- * smoke tests to pass, while maintaining toggle query hooks to test server failure paths.
+ * 1. HIGH RISK: Authentication & Token Exchange
+ * Fixed: Accepts automated frameworks passing 'undefined' parameters or dynamic user session strings.
+ * Test Toggles: Pass ?crash=true or ?simulate_load=true to induce faults on command.
  */
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
-  // Log payload metadata to fix missing visibility gaps reported by test engineers
-  console.log(`[AUTH-ATTEMPT] Username provided: "${username || 'none'}"`);
+  console.log(`[AUTH-ATTEMPT] Payload Username: "${username || 'none'}"`);
 
-  // Controlled trigger for simulating JWT signing crashes (500 errors)
-  // Can be hard-triggered via query parameter, or left at a low 5% random flake rate under load
+  // Controlled failure hooks replacing completely random crashes
   const shouldCrash = req.query.crash === 'true' || (req.query.simulate_load === 'true' && Math.random() < 0.05);
   if (shouldCrash) {
-    console.error(`[ERROR] CryptoWorkerPool failed to sign JWT payload structure.`);
+    console.error(`[ERROR 500] CryptoWorkerPool failed to sign JWT payload structure.`);
     return res.status(500).json({ 
       error: "Internal Server Error", 
       message: "CryptoWorkerPool failed to sign JWT payload structure." 
     });
   }
 
-  // Broadened credential acceptance criteria to ensure k6 setup functions don't immediately stall
+  // Permissive rule matrix to support baseline setup functions alongside local environments
   const isValidAdmin = username === 'admin' && password === 'secret';
   const isValidTestVU = username === 'testuser' || username === 'test' || (username && username.startsWith('vu'));
+  const isProjectJContext = username === 'ajaia_vqbkaoz' || (username && username.startsWith('loadtest'));
+  const isEmptySetupProbe = !username || username === 'none'; // Fallback for empty body probes
 
-  if (isValidAdmin || isValidTestVU) {
+  if (isValidAdmin || isValidTestVU || isProjectJContext || isEmptySetupProbe) {
     return res.json({ 
       token: "phoenix-test-token-valid",
       issuedAt: new Date().toISOString()
     });
   }
 
-  console.warn(`[WARN] 401 Unauthorized issued for user: "${username}"`);
+  // Issue clear audit logs for actual unexpected authentication payloads
+  console.warn(`[WARN 401] Unauthorized issued for username context: "${username}"`);
   return res.status(401).json({ error: "Unauthorized", message: "Invalid test credentials supplied." });
 });
 
 /**
- * 2. Business Critical User Directory & Search
+ * 2. MEDIUM RISK: Business Critical User Directory & Search
+ * Features: Heuristic concurrency gate evaluating downstream database simulation bottlenecks.
  */
 app.get('/api/users', (req, res) => {
-  // Check authorization token if passed by k6 main loop groups
+  // Optional flag to explicitly enforce token analysis headers passed by k6 loops
   const authHeader = req.headers['authorization'];
   if (req.query.require_auth === 'true' && (!authHeader || !authHeader.includes('phoenix-test-token-valid'))) {
     return res.status(401).json({ error: "Unauthorized", message: "Missing or invalid bearer token." });
   }
 
-  let delay = 100; // Base delay
+  let delay = 100; // Base microsecond processing cost
   
-  // Degrades connection pooling as VU concurrent stress spikes
+  // Real-time capacity gate processing
   if (activeConnections > DB_SIMULATION_THRESHOLD) {
-    console.warn(`[POOL-SATURATION] Active connections (${activeConnections}) exceeded threshold (${DB_SIMULATION_THRESHOLD}). Inducing latency cascade.`);
-    delay = 6000; // 6-second block to trigger SLA / Threshold breaches intentionally
+    console.warn(`[POOL-SATURATION] Active connections (${activeConnections}) breached saturation threshold (${DB_SIMULATION_THRESHOLD}). Inducing P95 latency fallback.`);
+    delay = 6000; // 6-second timeout block to guarantee SLA / Threshold breach evaluations
   } else if (req.query.slow === 'true') {
     delay = 3500;
   }
@@ -86,18 +90,18 @@ app.get('/api/users', (req, res) => {
 });
 
 /**
- * 3. Transaction Checkout / Post Action
+ * 3. MEDIUM RISK: Transaction Checkout / Post Action
+ * Features: Rejects mutations cleanly via 503 if lock queues exceed threshold limits.
  */
 app.post('/api/checkout', (req, res) => {
-  // Validate that the request has an authorization context
   const authHeader = req.headers['authorization'];
   if (req.query.require_auth === 'true' && (!authHeader || !authHeader.includes('phoenix-test-token-valid'))) {
     return res.status(401).json({ error: "Unauthorized", message: "Transaction blocked: Unauthenticated." });
   }
 
-  // Induce structural Service Unavailabilities under high connection depth or failure toggle flags
+  // Induce transaction database locks intentionally under heavy loads or manual test parameters
   if (activeConnections > 10 || req.query.fail === 'true') {
-    console.error(`[DB-LOCK] Write queue depth limit reached. Rejecting transaction mutation.`);
+    console.error(`[DB-MUTATION-LOCK] Active connections: ${activeConnections}. Write queue depth limit reached.`);
     return res.status(503).json({
       error: "Service Unavailable",
       message: "Database transaction lock queue depth exceeded limit."
@@ -108,20 +112,22 @@ app.post('/api/checkout', (req, res) => {
 });
 
 /**
- * 4. Health & Readiness Subsystem
- * Useful for automated execution frameworks to perform a "pre-flight check" before launching load tests.
+ * 4. LOW RISK: Health & Readiness Subsystem
+ * Great for execution engines running preflight environment checks.
  */
 app.get('/health', (req, res) => {
   if (req.query.dead === 'true') {
     return res.status(502).json({ status: "DOWN", infrastructure: "unhealthy" });
   }
-  res.status(200).json({ status: "UP", activeConnections });
+  res.status(200).json({ status: "UP", currentConnections: activeConnections });
 });
 
+// Server Initialization block
 const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`===================================================`);
   console.log(`Phoenix Test Target API running on port ${PORT}`);
-  console.log(`Logs active for tracking Framework Setup parameters`);
+  console.log(`Permissive validation matrix & live logging enabled.`);
+  console.log(`Ready for sustained multi-endpoint Project-J profiles.`);
   console.log(`===================================================`);
 });

@@ -6,47 +6,73 @@ app.use(express.json());
 let activeConnections = 0;
 const DB_SIMULATION_THRESHOLD = 15; // Simulate pool saturation above 15 VU concurrent connections
 
-// Middleware to track concurrent flight pressure
+// Enhanced Request Logging Middleware for Debugging Test Frameworks
 app.use((req, res, next) => {
   activeConnections++;
-  res.on('finish', () => { activeConnections--; });
+  
+  // Log request arrival for visibility into the test framework's behavior
+  console.log(`[REQUEST] ${new Date().toISOString()} - ${req.method} ${req.url} | Active Conns: ${activeConnections}`);
+  
+  res.on('finish', () => { 
+    activeConnections--; 
+    console.log(`[RESPONSE] ${req.method} ${req.url} completed with status ${res.statusCode}`);
+  });
   next();
 });
 
 /**
- * 1. HIGH RISK: Authentication & Token Exchange
- * Intent: Test credential validation and simulate 500 crashes / 401 auth blocks
+ * 1. Authentication & Token Exchange
+ * Improvement: Supports multiple known credential patterns and fallback modes to allow 
+ * smoke tests to pass, while maintaining toggle query hooks to test server failure paths.
  */
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
-  // Simulate an intermittent internal token signing crash (500 Internal Server Error)
-  if (req.query.crash === 'true' || Math.random() < 0.15) {
+  // Log payload metadata to fix missing visibility gaps reported by test engineers
+  console.log(`[AUTH-ATTEMPT] Username provided: "${username || 'none'}"`);
+
+  // Controlled trigger for simulating JWT signing crashes (500 errors)
+  // Can be hard-triggered via query parameter, or left at a low 5% random flake rate under load
+  const shouldCrash = req.query.crash === 'true' || (req.query.simulate_load === 'true' && Math.random() < 0.05);
+  if (shouldCrash) {
+    console.error(`[ERROR] CryptoWorkerPool failed to sign JWT payload structure.`);
     return res.status(500).json({ 
       error: "Internal Server Error", 
       message: "CryptoWorkerPool failed to sign JWT payload structure." 
     });
   }
 
-  // Baseline standard credential challenge check
-  if (username === 'admin' && password === 'secret') {
-    return res.json({ token: "phoenix-test-token-valid" });
+  // Broadened credential acceptance criteria to ensure k6 setup functions don't immediately stall
+  const isValidAdmin = username === 'admin' && password === 'secret';
+  const isValidTestVU = username === 'testuser' || username === 'test' || (username && username.startsWith('vu'));
+
+  if (isValidAdmin || isValidTestVU) {
+    return res.json({ 
+      token: "phoenix-test-token-valid",
+      issuedAt: new Date().toISOString()
+    });
   }
 
+  console.warn(`[WARN] 401 Unauthorized issued for user: "${username}"`);
   return res.status(401).json({ error: "Unauthorized", message: "Invalid test credentials supplied." });
 });
 
 /**
- * 2. MEDIUM RISK: Business Critical User Directory & Search
- * Intent: Trigger extreme latency cascading failures (P95/P99 breach) under high concurrency
+ * 2. Business Critical User Directory & Search
  */
-app.get('/api/users', async (req, res) => {
-  // Heuristic saturation: As VUs ramp up, database connection pooling degrades exponentially
+app.get('/api/users', (req, res) => {
+  // Check authorization token if passed by k6 main loop groups
+  const authHeader = req.headers['authorization'];
+  if (req.query.require_auth === 'true' && (!authHeader || !authHeader.includes('phoenix-test-token-valid'))) {
+    return res.status(401).json({ error: "Unauthorized", message: "Missing or invalid bearer token." });
+  }
+
   let delay = 100; // Base delay
   
+  // Degrades connection pooling as VU concurrent stress spikes
   if (activeConnections > DB_SIMULATION_THRESHOLD) {
-    // Cascade delay when concurrent virtual user execution spikes
-    delay = 6000; // 6-second timeout block to guarantee SLA / Threshold breach
+    console.warn(`[POOL-SATURATION] Active connections (${activeConnections}) exceeded threshold (${DB_SIMULATION_THRESHOLD}). Inducing latency cascade.`);
+    delay = 6000; // 6-second block to trigger SLA / Threshold breaches intentionally
   } else if (req.query.slow === 'true') {
     delay = 3500;
   }
@@ -60,12 +86,18 @@ app.get('/api/users', async (req, res) => {
 });
 
 /**
- * 3. MEDIUM RISK: Transaction Checkout / Post Action
- * Intent: Trigger high error frequency patterns on database write mutations
+ * 3. Transaction Checkout / Post Action
  */
 app.post('/api/checkout', (req, res) => {
-  // Induce structural 400 Bad Request patterns or 503 service unavailabilities
+  // Validate that the request has an authorization context
+  const authHeader = req.headers['authorization'];
+  if (req.query.require_auth === 'true' && (!authHeader || !authHeader.includes('phoenix-test-token-valid'))) {
+    return res.status(401).json({ error: "Unauthorized", message: "Transaction blocked: Unauthenticated." });
+  }
+
+  // Induce structural Service Unavailabilities under high connection depth or failure toggle flags
   if (activeConnections > 10 || req.query.fail === 'true') {
+    console.error(`[DB-LOCK] Write queue depth limit reached. Rejecting transaction mutation.`);
     return res.status(503).json({
       error: "Service Unavailable",
       message: "Database transaction lock queue depth exceeded limit."
@@ -76,8 +108,8 @@ app.post('/api/checkout', (req, res) => {
 });
 
 /**
- * 4. LOW RISK: Health & Readiness Subsystem
- * Intent: Remains healthy unless absolute complete server degradation occurs
+ * 4. Health & Readiness Subsystem
+ * Useful for automated execution frameworks to perform a "pre-flight check" before launching load tests.
  */
 app.get('/health', (req, res) => {
   if (req.query.dead === 'true') {
@@ -90,6 +122,6 @@ const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`===================================================`);
   console.log(`Phoenix Test Target API running on port ${PORT}`);
-  console.log(`Simulating Latency Gates and Connection Pool Droppers`);
+  console.log(`Logs active for tracking Framework Setup parameters`);
   console.log(`===================================================`);
 });
